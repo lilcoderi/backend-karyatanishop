@@ -116,8 +116,11 @@ use App\Http\Controllers\OrderController;
     Route::middleware(['auth:api', 'permission:order-edit'])->put('/orders/{id}', [OrderController::class, 'update']);   // Mengupdate status order
     Route::middleware(['auth:api', 'permission:order-delete'])->delete('/orders/{id}', [OrderController::class, 'destroy']);// Menghapus order
 // });
-Route::middleware(['auth:api'])->post('/orders-search', [OrderController::class, 'searchOrder']);         // Mengambil daftar order
 
+Route::post('/order-now', [OrderController::class, 'orderNow']);
+Route::middleware(['auth:api'])->post('/orders-search', [OrderController::class, 'searchOrder']);         // Mengambil daftar order
+// Route::middleware(['auth:api'])->get('/orders/user', [OrderController::class, 'getOrdersByUser']);
+Route::middleware(['auth:api', 'permission:order-list'])->get('/orders-user', [OrderController::class, 'indexx']);  
 
 // Transaction
 use App\Http\Controllers\TransactionController;
@@ -140,6 +143,8 @@ Route::middleware('auth:api')->group(function () {
     Route::middleware(['auth:api', 'permission:review-edit'])->put('/reviews/{id}', [ReviewController::class, 'update']);
     Route::middleware(['auth:api', 'permission:review-delete'])->delete('/reviews/{id}', [ReviewController::class, 'destroy']);
     Route::middleware(['auth:api'])->get('/products/{produk_id}/average-rating', [ReviewController::class, 'getAverageRating']);
+    Route::get('review/order', [ReviewController::class, 'getReviewsByOrderId']);
+    Route::get('/review/{order_id}', [ReviewController::class, 'showReviewByOrderId']);
 
 });
 
@@ -190,10 +195,22 @@ Route::group(['middleware' => 'auth:api'], function () {
     Route::delete('/keranjang-offline/{id}', [KeranjangOfflineController::class, 'removeItem']);
 
     Route::get('item-nota/{id}', [KeranjangOfflineController::class, 'itemNotaById']);
+    Route::get('nota-belanja/{nota_belanja_id}', [KeranjangOfflineController::class, 'getItemsByNotaId']);
 });
 Route::get('test-auth', [AuthController::class, 'testAuth']);
+
 use App\Http\Controllers\TariffController;
 Route::post('/tariff-check', [TariffController::class, 'getTariff']);
+
+use App\Http\Controllers\CheckOngkirController;
+Route::get('provinces', [CheckOngkirController::class, 'province'])->name('provinces');
+Route::get('cities', [CheckOngkirController::class, 'city'])->name('cities');
+Route::post('check-ongkir', [CheckOngkirController::class, 'checkOngkir'])->name('check-ongkir');
+
+Route::middleware('auth:api')->get('/addresses', [AddressController::class, 'getAllAddresses']);
+Route::middleware('auth:api')->get('/addresses/{userId}', [AddressController::class, 'getAddressByUserId']);
+
+
 // Route::middleware('auth:api')->group(function () {
 //     // Role Kasir hanya bisa mengakses resource users kecuali create dan edit
 //     Route::middleware('role:kasir')->resource('users', UserController::class)->except(['create', 'edit']);

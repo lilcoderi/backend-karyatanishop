@@ -19,6 +19,7 @@ class Review extends Model
         'user_id',
         'content',
         'rating',
+        'order_id', // Menambahkan order_id
     ];
 
     public function produk()
@@ -31,6 +32,10 @@ class Review extends Model
         return $this->belongsTo(User::class, 'user_id', 'user_id');
     }
 
+    public function order()
+    {
+        return $this->belongsTo(Order::class, 'order_id', 'order_id'); // Relasi dengan model Order
+    }
 
     protected static function boot()
     {

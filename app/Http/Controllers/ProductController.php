@@ -8,7 +8,11 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use App\Models\Promo;
 use Illuminate\Support\Facades\Storage;
-
+use Spatie\Permission\Models\Role;
+use Illuminate\Support\Facades\Log;
+use Spatie\Permission\Models\Permission;
+use App\Models\User;
+use App\Models\Notification;
 class ProductController extends Controller
 {
     /**
@@ -31,23 +35,27 @@ class ProductController extends Controller
      * )
      */
     public function index(Request $request)
-    {
-        // Initialize the query builder with relationships
-        $query = Produk::with(['kategori', 'promo']);
+{
+    // Initialize the query builder with relationships
+    $query = Produk::with(['kategori', 'promo']);
 
-        // Check if the 'search' query parameter exists
-        if ($request->has('search')) {
-            $query->where('nama_produk', 'like', '%' . $request->search . '%');
-        }
-
-        // Menambahkan pagination dengan 5 item per halaman
-        $products = $query->paginate(5);
-
-        return response()->json([
-            'status' => 'success',
-            'data' => $products,
-        ]);
+    // Check if the 'search' query parameter exists
+    if ($request->has('search')) {
+        $query->where('nama_produk', 'like', '%' . $request->search . '%');
     }
+
+    // Order by the latest created date
+    $query->orderBy('created_at', 'desc');
+
+    // Menambahkan pagination dengan 5 item per halaman
+    $products = $query->paginate(5);
+
+    return response()->json([
+        'status' => 'success',
+        'data' => $products,
+    ]);
+}
+
 
 
     public function productsAll(Request $request)
@@ -296,63 +304,103 @@ class ProductController extends Controller
      * )
      */
     public function store(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'kategori_id' => 'required|exists:kategori,kategori_id',
-            'nama_produk' => 'required|string|max:255',
-            'merk' => 'nullable|string|max:255',
-            'deskripsi_produk' => 'nullable|string',
-            'berat' => 'required|numeric',
-            'harga_satuan' => 'required|numeric',
-            'stok' => 'required|integer|min:0',
-            'status_produk' => 'required|in:aktif,nonaktif',
-            'gambar' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-            'promo_id' => [
-                'nullable',
-                'exists:promo,promo_id',
-                function ($attribute, $value, $fail) {
-                    $promo = Promo::find($value);
-                    if ($promo && $promo->jenis_promo !== 'diskon') {
-                        $fail('The selected promo must have a jenis_promo of "diskon".');
-                    }
-                },
-            ],
+{
+    Log::info('Memulai proses tambah produk baru.');
+
+    // Validasi input
+    $validator = Validator::make($request->all(), [
+        'kategori_id' => 'required|exists:kategori,kategori_id',
+        'nama_produk' => 'required|string|max:255',
+        'merk' => 'nullable|string|max:255',
+        'deskripsi_produk' => 'nullable|string',
+        'berat' => 'required|numeric',
+        'harga_satuan' => 'required|numeric',
+        'stok' => 'required|integer|min:0',
+        'status_produk' => 'required|in:aktif,nonaktif',
+        'gambar' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+        'promo_id' => [
+            'nullable',
+            'exists:promo,promo_id',
+            function ($attribute, $value, $fail) {
+                $promo = Promo::find($value);
+                if ($promo && $promo->jenis_promo !== 'diskon') {
+                    $fail('Promo harus memiliki jenis_promo "diskon".');
+                }
+            },
+        ],
+    ]);
+
+    if ($validator->fails()) {
+        Log::warning('Validasi gagal.', ['errors' => $validator->errors()]);
+        return response()->json(['errors' => $validator->errors()], 422);
+    }
+
+    Log::info('Validasi input berhasil.');
+
+    // Ambil detail promo jika ada
+    $promo = $request->promo_id ? Promo::find($request->promo_id) : null;
+
+    // Hitung harga setelah diskon
+    $harga_satuan = $request->harga_satuan;
+    $after_diskon = $promo ? max($harga_satuan - ($harga_satuan * $promo->nilai_promo / 100), 0) : $harga_satuan;
+
+    // Upload file gambar
+    $gambarPath = $request->hasFile('gambar') ? $request->file('gambar')->store('produk', 'public') : null;
+
+    // Simpan produk dengan harga setelah diskon
+    $product = Produk::create(array_merge($request->all(), [
+        'produk_id' => (string) Str::uuid(),
+        'after_diskon' => $after_diskon,
+        'gambar' => $gambarPath ? 'storage/' . $gambarPath : null,
+    ]));
+
+    Log::info('Produk berhasil disimpan.', ['produk_id' => $product->produk_id]);
+
+    // Kirim notifikasi ke semua pengguna dengan role 'customer'
+   // Kirim notifikasi ke semua pengguna dengan role 'customer'
+$customers = User::role('customer')->get();
+
+if ($customers->isEmpty()) {
+    Log::warning('Tidak ada user dengan role customer ditemukan.');
+    return response()->json([
+        'status' => 'warning',
+        'message' => 'Produk berhasil ditambahkan, namun tidak ada pelanggan untuk menerima notifikasi.',
+    ], 201);
+}
+
+foreach ($customers as $customer) {
+    if (empty($customer->user_id)) {
+        Log::warning('Customer dengan data tidak valid ditemukan tetapi tetap mengirim notifikasi.', [
+            'customer' => $customer->toArray()
+        ]);
+    }
+
+    try {
+        Notification::create([
+            'user_id' => $customer->user_id,
+            'message' => "Produk baru telah ditambahkan: {$product->nama_produk}. Jangan lewatkan kesempatan untuk mendapatkannya!",
+            'status' => 'unread',
         ]);
 
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        // Retrieve the promo details if exists
-        $promo = null;
-        if ($request->promo_id) {
-            $promo = Promo::find($request->promo_id);
-        }
-
-        // Calculate the price after discount
-        $harga_satuan = $request->harga_satuan;
-        $after_diskon = $harga_satuan;
-
-        if ($promo && $promo->jenis_promo === 'diskon') {
-            $after_diskon = $harga_satuan - ($harga_satuan * $promo->nilai_promo / 100);
-            $after_diskon = max($after_diskon, 0); // Ensure the price is not negative
-        }
-
-        // Handle file upload
-        $gambarPath = null;
-        if ($request->hasFile('gambar')) {
-            $gambarPath = $request->file('gambar')->store('produk', 'public');
-        }
-
-        // Store the product with after_diskon value
-        $product = Produk::create(array_merge($request->all(), [
-            'produk_id' => (string) Str::uuid(),
-            'after_diskon' => $after_diskon, // Add the after_diskon field
-            'gambar' => $gambarPath ? 'storage/' . $gambarPath : null, // Save the public path of the image
-        ]));
-
-        return response()->json($product, 201);
+        Log::info('Notifikasi dikirim ke user customer.', ['user_id' => $customer->user_id]);
+    } catch (\Exception $e) {
+        Log::error('Gagal mengirim notifikasi.', [
+            'user_id' => $customer->user_id,
+            'error' => $e->getMessage(),
+        ]);
     }
+}
+
+return response()->json([
+    'status' => 'success',
+    'message' => 'Produk berhasil ditambahkan dan notifikasi telah dikirim.',
+    'data' => $product,
+], 201);
+
+
+}
+
+    
 
 
 
@@ -406,52 +454,65 @@ class ProductController extends Controller
      * )
      */
 
-    public function update(Request $request, $id)
-    {
-        // Validasi input
-        $validator = Validator::make($request->all(), [
-            'kategori_id' => 'sometimes|required|exists:kategori,kategori_id',
-            'nama_produk' => 'sometimes|required|string|max:255',
-            'merk' => 'nullable|string|max:255',
-            'deskripsi_produk' => 'nullable|string',
-            'berat' => 'sometimes|required|numeric',
-            'harga_satuan' => 'sometimes|required|numeric',
-            'stok' => 'sometimes|required|integer|min:0',
-            'status_produk' => 'sometimes|required|in:aktif,nonaktif',
-            'gambar' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json(['errors' => $validator->errors()], 422);
-        }
-
-        // Cek apakah produk ada
-        $product = Produk::find($id);
-        if (!$product) {
-            return response()->json(['error' => 'Produk tidak ditemukan'], 404);
-        }
-
-        // Ambil semua input kecuali gambar
-        $data = $request->except(['gambar']);
-
-        // Jika ada file gambar baru, handle penghapusan gambar lama
-        if ($request->hasFile('gambar')) {
-            // Hapus gambar lama jika ada
-            if ($product->gambar && Storage::disk('public')->exists(str_replace('storage/', '', $product->gambar))) {
-                Storage::disk('public')->delete(str_replace('storage/', '', $product->gambar));
-            }
-
-            // Simpan gambar baru
-            $gambarPath = $request->file('gambar')->store('produk', 'public');
-            $data['gambar'] = 'storage/' . $gambarPath;
-        }
-
-        // Update produk
-        $product->update($data);
-
-        return response()->json($product, 200);
-    }
-
+     public function update(Request $request, $id)
+     {
+         try {
+             // Validasi input
+             $validator = Validator::make($request->all(), [
+                 'kategori_id' => 'sometimes|required|exists:kategori,kategori_id',
+                 'nama_produk' => 'sometimes|required|string|max:255',
+                 'merk' => 'nullable|string|max:255',
+                 'deskripsi_produk' => 'nullable|string',
+                 'berat' => 'sometimes|required|numeric',
+                 'harga_satuan' => 'sometimes|required|numeric',
+                 'stok' => 'sometimes|required|integer|min:0',
+                 'status_produk' => 'sometimes|required|in:aktif,nonaktif',
+                 'gambar' => 'nullable|image|mimes:jpeg,png,jpg,gif|max:2048',
+             ]);
+     
+             if ($validator->fails()) {
+                 \Log::error('Validation failed:', $validator->errors()->toArray());
+                 return response()->json(['errors' => $validator->errors()], 422);
+             }
+     
+             // Cek apakah produk ada
+             $product = Produk::find($id);
+             if (!$product) {
+                 \Log::error("Product not found: ID $id");
+                 return response()->json(['error' => 'Produk tidak ditemukan'], 404);
+             }
+     
+             // Ambil semua input kecuali gambar
+             $data = $request->except(['gambar']);
+     
+             // Jika ada file gambar baru, handle penghapusan gambar lama
+             if ($request->hasFile('gambar')) {
+                 // Hapus gambar lama jika ada
+                 if ($product->gambar && Storage::disk('public')->exists(str_replace('storage/', '', $product->gambar))) {
+                     Storage::disk('public')->delete(str_replace('storage/', '', $product->gambar));
+                 }
+     
+                 // Simpan gambar baru
+                 $gambarPath = $request->file('gambar')->store('produk', 'public');
+                 $data['gambar'] = 'storage/' . $gambarPath;
+             }
+     
+             // Update produk
+             $product->update($data);
+     
+             \Log::info("Product updated successfully: ID $id", $data);
+     
+             return response()->json($product, 200);
+         } catch (Exception $e) {
+             \Log::error("Error updating product: " . $e->getMessage(), [
+                 'id' => $id,
+                 'data' => $request->all(),
+             ]);
+     
+             return response()->json(['error' => 'Terjadi kesalahan saat memperbarui produk.'], 500);
+         }
+     }
+     
 
 
 

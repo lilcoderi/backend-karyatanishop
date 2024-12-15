@@ -8,11 +8,15 @@ use App\Models\Order;
 use App\Models\Keranjang;
 use App\Models\ItemKeranjang;
 use App\Models\Transaksi;
-use Tymon\JWTAuth\Facades\JWTAuth;
 use App\Models\OrderDetail;
 use App\Models\Promo;
 use App\Models\ProdukItem;
-
+use App\Models\User;
+use Tymon\JWTAuth\Facades\JWTAuth;
+use Illuminate\Support\Facades\Log;
+use Spatie\Permission\Models\Role;
+use App\Models\Notification;
+use App\Models\Produk;
 class OrderController extends Controller
 {
     /**
@@ -77,35 +81,201 @@ class OrderController extends Controller
      *     )
      * )
      */
-    public function create(Request $request)
-    {
+
+     public function create(Request $request)
+     {
+         // Log awal fungsi
+         Log::info('Memulai proses create order');
+     
+         try {
+             // Autentikasi pengguna dengan JWT
+             $user = JWTAuth::parseToken()->authenticate();
+             $userId = $user->user_id;
+             Log::info("User terautentikasi: ID = {$userId}, Nama = {$user->nama}");
+     
+             // Validasi input
+             $request->validate([
+                 'item_keranjang_id' => 'required|array|min:1',
+                 'item_keranjang_id.*' => 'uuid|exists:item_keranjang,item_keranjang_id',
+                 'kode_voucher' => 'nullable|string|exists:promo,kode_voucher',
+                 'ongkir' => 'required|numeric|min:0', // Validasi ongkir harus ada dan numeric, dengan minimum 0
+             ]);
+     
+             // Ambil item keranjang yang valid
+             $items = ItemKeranjang::whereIn('item_keranjang_id', $request->item_keranjang_id)
+                 ->whereHas('keranjang', function ($query) use ($userId) {
+                     $query->where('user_id', $userId);
+                 })
+                 ->get();
+     
+             if ($items->isEmpty()) {
+                 Log::warning("Item keranjang tidak ditemukan untuk user ID {$userId}");
+                 return response()->json([
+                     'status' => 'error',
+                     'message' => 'No valid items found for this order',
+                 ], 400);
+             }
+     
+             Log::info('Item keranjang valid ditemukan', ['jumlah_item' => $items->count()]);
+     
+             // Hitung total bayar
+             $total_bayar = $items->sum('subtotal');
+             Log::info('Total pembayaran dihitung', ['total_bayar' => $total_bayar]);
+     
+             // Cek promo jika ada
+             $promo = null;
+             if ($request->kode_voucher) {
+                 $promo = Promo::where('kode_voucher', $request->kode_voucher)->first();
+     
+                 if (!$promo || now()->lt($promo->tgl_mulai) || now()->gt($promo->tgl_berakhir)) {
+                     Log::warning("Voucher tidak valid atau kadaluarsa: {$request->kode_voucher}");
+                     return response()->json([
+                         'status' => 'error',
+                         'message' => 'Voucher tidak valid atau sudah kadaluarsa.',
+                     ], 400);
+                 }
+     
+                 if ($promo->jenis_promo === 'voucher') {
+                     $total_bayar = max($total_bayar - $promo->nilai_promo, 0);
+                     Log::info('Promo diterapkan', ['nilai_promo' => $promo->nilai_promo, 'total_bayar' => $total_bayar]);
+                 }
+             }
+     
+             // Tambahkan ongkir ke total bayar
+             $total_bayar += $request->ongkir; // Menambahkan ongkir ke total bayar
+             Log::info('Ongkir ditambahkan ke total pembayaran', ['ongkir' => $request->ongkir, 'total_bayar' => $total_bayar]);
+     
+             // Buat order
+             $order = Order::create([
+                 'order_id' => Str::uuid(),
+                 'user_id' => $userId,
+                 'tgl_order' => now(),
+                 'status_order' => 'pending',
+             ]);
+     
+             Log::info('Order berhasil dibuat', ['order_id' => $order->order_id]);
+     
+             foreach ($items as $item) {
+                 // Simpan ke tabel order_detail
+                 OrderDetail::create([
+                     'detail_id' => Str::uuid(),
+                     'order_id' => $order->order_id,
+                     'produk_id' => $item->produk_id,
+                     'quantity' => $item->kuantitas,
+                 ]);
+     
+                 // Simpan ke tabel produk_item
+                 ProdukItem::create([
+                     'produk_item_id' => Str::uuid(),
+                     'order_id' => $order->order_id,
+                     'produk_id' => $item->produk_id,
+                     'kuantitas' => $item->kuantitas,
+                     'harga_satuan' => $item->harga_satuan,
+                     'subtotal' => $item->subtotal,
+                 ]);
+     
+                 // Update item_keranjang dengan order_id
+                 $item->update([
+                     'order_id' => $order->order_id,
+                 ]);
+     
+                 // Hapus item yang sudah diproses dari keranjang
+                 $item->delete();
+                 Log::info("Item keranjang dengan ID {$item->item_keranjang_id} dihapus setelah pemesanan.");
+             }
+     
+             // Buat transaksi
+             Transaksi::create([
+                 'transaksi_id' => Str::uuid(),
+                 'order_id' => $order->order_id,
+                 'total_pembayaran' => $total_bayar,
+                 'status_pembayaran' => 'pending',
+             ]);
+     
+             Log::info('Transaksi berhasil dibuat', ['order_id' => $order->order_id, 'total_pembayaran' => $total_bayar]);
+     
+             // Kirim notifikasi ke admin
+             $adminUsers = User::role('admin')->get();
+             if ($adminUsers->isEmpty()) {
+                 Log::warning('Tidak ada admin ditemukan untuk menerima notifikasi');
+                 return response()->json([
+                     'status' => 'warning',
+                     'message' => 'Order berhasil dibuat, namun tidak ada admin untuk menerima notifikasi.',
+                 ], 200);
+             }
+     
+             foreach ($adminUsers as $admin) {
+                 Notification::create([
+                     'user_id' => $admin->user_id,
+                     'message' => "Order baru telah dibuat oleh user {$user->nama}. Order ID: {$order->order_id}. Total pembayaran: Rp{$total_bayar}.",
+                     'status' => 'unread',
+                 ]);
+     
+                 Log::info("Notifikasi dibuat untuk admin ID {$admin->user_id}");
+             }
+     
+             return response()->json([
+                 'status' => 'success',
+                 'message' => 'Order and transaction created successfully',
+                 'data' => [
+                     'order' => $order,
+                     'total_bayar' => $total_bayar,
+                     'promo_applied' => $promo ? $promo->kode_voucher : null,
+                 ],
+             ], 201);
+         } catch (\Exception $e) {
+             // Log error
+             Log::error('Terjadi kesalahan saat membuat order', [
+                 'error' => $e->getMessage(),
+                 'trace' => $e->getTraceAsString() // Menambahkan stack trace untuk detail lebih lanjut
+             ]);
+     
+             return response()->json([
+                 'status' => 'error',
+                 'message' => 'Terjadi kesalahan, silakan coba lagi.',
+             ], 500);
+         }
+     }
+     
+
+     
+public function orderNow(Request $request)
+{
+    // Log awal fungsi
+    Log::info('Memulai proses order now');
+
+    try {
         // Autentikasi pengguna dengan JWT
         $user = JWTAuth::parseToken()->authenticate();
         $userId = $user->user_id;
+        Log::info("User terautentikasi: ID = {$userId}, Nama = {$user->nama}");
 
         // Validasi input
         $request->validate([
-            'item_keranjang_id' => 'required|array|min:1',
-            'item_keranjang_id.*' => 'uuid|exists:item_keranjang,item_keranjang_id',
+            'produk_id' => 'required|uuid|exists:produk,produk_id',
+            'quantity' => 'required|integer|min:1',
             'kode_voucher' => 'nullable|string|exists:promo,kode_voucher',
+            'ongkir' => 'required|numeric|min:0', // Validasi ongkir
         ]);
 
-        // Ambil item keranjang yang valid
-        $items = ItemKeranjang::whereIn('item_keranjang_id', $request->item_keranjang_id)
-            ->whereHas('keranjang', function ($query) use ($userId) {
-                $query->where('user_id', $userId);
-            })
-            ->get();
+        // Ambil produk yang ingin dipesan
+        $produk = Produk::find($request->produk_id);
 
-        if ($items->isEmpty()) {
+        if (!$produk) {
+            Log::warning("Produk tidak ditemukan: ID = {$request->produk_id}");
             return response()->json([
                 'status' => 'error',
-                'message' => 'No valid items found for this order',
-            ], 400);
+                'message' => 'Produk tidak ditemukan.',
+            ], 404);
         }
 
+        // Hitung subtotal berdasarkan kuantitas yang dipesan
+        $subtotal = $produk->harga_satuan * $request->quantity;
+        Log::info('Subtotal dihitung', ['subtotal' => $subtotal]);
+
         // Hitung total bayar
-        $total_bayar = $items->sum('subtotal');
+        $total_bayar = $subtotal + $request->ongkir; // Menambahkan ongkir ke total bayar
+        Log::info('Total pembayaran dihitung', ['total_bayar' => $total_bayar]);
 
         // Cek promo jika ada
         $promo = null;
@@ -113,6 +283,7 @@ class OrderController extends Controller
             $promo = Promo::where('kode_voucher', $request->kode_voucher)->first();
 
             if (!$promo || now()->lt($promo->tgl_mulai) || now()->gt($promo->tgl_berakhir)) {
+                Log::warning("Voucher tidak valid atau kadaluarsa: {$request->kode_voucher}");
                 return response()->json([
                     'status' => 'error',
                     'message' => 'Voucher tidak valid atau sudah kadaluarsa.',
@@ -121,6 +292,7 @@ class OrderController extends Controller
 
             if ($promo->jenis_promo === 'voucher') {
                 $total_bayar = max($total_bayar - $promo->nilai_promo, 0);
+                Log::info('Promo diterapkan', ['nilai_promo' => $promo->nilai_promo, 'total_bayar' => $total_bayar]);
             }
         }
 
@@ -132,30 +304,25 @@ class OrderController extends Controller
             'status_order' => 'pending',
         ]);
 
-        foreach ($items as $item) {
-            // Simpan ke tabel order_detail
-            OrderDetail::create([
-                'detail_id' => Str::uuid(),
-                'order_id' => $order->order_id,
-                'produk_id' => $item->produk_id,
-                'quantity' => $item->kuantitas,
-            ]);
+        Log::info('Order berhasil dibuat', ['order_id' => $order->order_id]);
 
-            // Simpan ke tabel produk_item
-            ProdukItem::create([
-                'produk_item_id' => Str::uuid(),
-                'order_id' => $order->order_id,
-                'produk_id' => $item->produk_id,
-                'kuantitas' => $item->kuantitas,
-                'harga_satuan' => $item->harga_satuan,
-                'subtotal' => $item->subtotal,
-            ]);
+        // Simpan ke tabel order_detail
+        OrderDetail::create([
+            'detail_id' => Str::uuid(),
+            'order_id' => $order->order_id,
+            'produk_id' => $produk->produk_id,
+            'quantity' => $request->quantity,
+        ]);
 
-            // Update item_keranjang dengan order_id
-            $item->update([
-                'order_id' => $order->order_id,
-            ]);
-        }
+        // Simpan ke tabel produk_item
+        ProdukItem::create([
+            'produk_item_id' => Str::uuid(),
+            'order_id' => $order->order_id,
+            'produk_id' => $produk->produk_id,
+            'kuantitas' => $request->quantity,
+            'harga_satuan' => $produk->harga_satuan,
+            'subtotal' => $subtotal,
+        ]);
 
         // Buat transaksi
         Transaksi::create([
@@ -164,6 +331,28 @@ class OrderController extends Controller
             'total_pembayaran' => $total_bayar,
             'status_pembayaran' => 'pending',
         ]);
+
+        Log::info('Transaksi berhasil dibuat', ['order_id' => $order->order_id, 'total_pembayaran' => $total_bayar]);
+
+        // Kirim notifikasi ke admin
+        $adminUsers = User::role('admin')->get();
+        if ($adminUsers->isEmpty()) {
+            Log::warning('Tidak ada admin ditemukan untuk menerima notifikasi');
+            return response()->json([
+                'status' => 'warning',
+                'message' => 'Order berhasil dibuat, namun tidak ada admin untuk menerima notifikasi.',
+            ], 200);
+        }
+
+        foreach ($adminUsers as $admin) {
+            Notification::create([
+                'user_id' => $admin->user_id,
+                'message' => "Order baru telah dibuat oleh user {$user->nama}. Order ID: {$order->order_id}. Total pembayaran: Rp{$total_bayar}.",
+                'status' => 'unread',
+            ]);
+
+            Log::info("Notifikasi dibuat untuk admin ID {$admin->user_id}");
+        }
 
         return response()->json([
             'status' => 'success',
@@ -174,7 +363,17 @@ class OrderController extends Controller
                 'promo_applied' => $promo ? $promo->kode_voucher : null,
             ],
         ], 201);
+    } catch (\Exception $e) {
+        // Log error
+        Log::error('Terjadi kesalahan saat membuat order', ['error' => $e->getMessage()]);
+
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Terjadi kesalahan, silakan coba lagi.',
+        ], 500);
     }
+}
+
 
     /**
  * @OA\Post(
@@ -344,15 +543,19 @@ class OrderController extends Controller
      * )
      */
     public function index(Request $request)
-{
-    // Memuat relasi 'user' dan 'produkItems.produk' dengan pagination
-    $orders = Order::with(['user', 'produkItems.produk'])->paginate(5);
-
-    return response()->json([
-        'status' => 'success',
-        'data' => $orders,
-    ]);
-}
+    {
+        // Memuat relasi 'user' dan 'produkItems.produk' dengan pagination
+        // Urutkan berdasarkan 'created_at' descending
+        $orders = Order::with(['user', 'produkItems.produk'])
+            ->orderBy('created_at', 'desc') // Mengurutkan berdasarkan tanggal terbaru
+            ->paginate(5);
+    
+        return response()->json([
+            'status' => 'success',
+            'data' => $orders,
+        ]);
+    }
+    
 
 
 
@@ -483,12 +686,12 @@ class OrderController extends Controller
             ], 404);
         }
 
-        if ($request->user()->role !== 'kasir') {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Unauthorized access',
-            ], 403);
-        }
+        // if ($request->user()->role !== 'kasir') {
+        //     return response()->json([
+        //         'status' => 'error',
+        //         'message' => 'Unauthorized access',
+        //     ], 403);
+        // }
 
         $order->update(['status_order' => $request->status_order]);
 
@@ -564,4 +767,56 @@ class OrderController extends Controller
             'message' => 'Order deleted successfully',
         ]);
     }
+
+    public function indexx(Request $request)
+{
+    try {
+        // Log token yang diterima
+        $token = JWTAuth::getToken();
+        Log::info('Token received:', ['token' => $token]);
+
+        if (!$token) {
+            Log::error('Token not provided');
+            return response()->json(['error' => 'Token not provided'], 400);
+        }
+
+        // Autentikasi user dengan JWT
+        $user = JWTAuth::parseToken()->authenticate();
+        Log::info('User authenticated:', ['user' => $user]);
+
+        if (!$user) {
+            Log::error('Unauthorized access');
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+
+        // Ambil order berdasarkan user_id yang login
+        $orders = Order::with(['produkItems.produk'])
+            ->where('user_id', $user->user_id)
+            ->paginate(5); // Pagination
+        
+        Log::info('Orders fetched:', ['orders' => $orders]);
+
+        // Cek jika orders kosong
+        if ($orders->isEmpty()) {
+            Log::warning('No orders found for user', ['user_id' => $user->user_id]);
+            return response()->json([
+                'status' => 'error',
+                'message' => 'No orders found for this user',
+            ], 404);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'data' => $orders,
+        ]);
+    } catch (\Exception $e) {
+        Log::error('Error fetching orders', ['exception' => $e->getMessage()]);
+        return response()->json([
+            'status' => 'error',
+            'message' => $e->getMessage(),
+        ], 500);
+    }
+}
+
+
 }

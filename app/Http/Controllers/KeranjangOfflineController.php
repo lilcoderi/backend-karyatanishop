@@ -217,21 +217,36 @@ public function addToKeranjangOffline(Request $request)
     // Pastikan harga setelah diskon ada (misalnya, harga setelah diskon tidak null)
     $hargaSatuan = $produk->after_diskon ?? $produk->harga;
 
-    $subtotal = $hargaSatuan * $request->kuantitas;
+    // Cari item di keranjang offline yang sudah ada untuk produk yang sama
+    $itemKeranjangOffline = ItemKeranjangOffline::where('keranjang_offline_id', $keranjangOffline->keranjang_offline_id)
+        ->where('produk_id', $produk->produk_id)
+        ->first();
 
-    // Menambahkan item ke keranjang offline
-    $itemKeranjangOffline = ItemKeranjangOffline::create([
-        'keranjang_offline_id' => $keranjangOffline->keranjang_offline_id,
-        'produk_id' => $produk->produk_id,
-        'kuantitas' => $request->kuantitas,
-        'harga_satuan' => $hargaSatuan,
-        'subtotal' => $subtotal,
-    ]);
+    if ($itemKeranjangOffline) {
+        // Jika produk sudah ada, tambahkan kuantitasnya
+        $itemKeranjangOffline->kuantitas += $request->kuantitas;
+        $itemKeranjangOffline->subtotal = $itemKeranjangOffline->kuantitas * $hargaSatuan;
+        $itemKeranjangOffline->save();
 
-    // Debug log
-    Log::info('Produk berhasil ditambahkan ke keranjang', ['item' => $itemKeranjangOffline]);
+        Log::info('Kuantitas produk di keranjang berhasil diperbarui', ['item' => $itemKeranjangOffline]);
 
-    return response()->json(['message' => 'Produk berhasil ditambahkan ke keranjang', 'item' => $itemKeranjangOffline], 201);
+        return response()->json(['message' => 'Kuantitas produk berhasil diperbarui di keranjang', 'item' => $itemKeranjangOffline], 200);
+    } else {
+        // Jika produk belum ada, tambahkan sebagai item baru
+        $subtotal = $hargaSatuan * $request->kuantitas;
+
+        $itemKeranjangOffline = ItemKeranjangOffline::create([
+            'keranjang_offline_id' => $keranjangOffline->keranjang_offline_id,
+            'produk_id' => $produk->produk_id,
+            'kuantitas' => $request->kuantitas,
+            'harga_satuan' => $hargaSatuan,
+            'subtotal' => $subtotal,
+        ]);
+
+        Log::info('Produk berhasil ditambahkan ke keranjang', ['item' => $itemKeranjangOffline]);
+
+        return response()->json(['message' => 'Produk berhasil ditambahkan ke keranjang', 'item' => $itemKeranjangOffline], 201);
+    }
 }
 
 /**
@@ -460,6 +475,37 @@ public function itemNota()
  * )
  */
 
+ public function getItemsByNotaId($nota_belanja_id)
+{
+    try {
+        // Ambil NotaBelanja berdasarkan nota_belanja_id dan relasi ke produk (ItemNotaBelanja)
+        $nota = NotaBelanja::with('items.produk') // Menggunakan relasi 'items' untuk mengambil data ItemNotaBelanja dan relasi 'produk'
+                            ->where('nota_belanja_id', $nota_belanja_id)
+                            ->first();
+
+        // Cek jika nota ditemukan
+        if (!$nota) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Data tidak ditemukan.',
+            ], 404);
+        }
+
+        // Return data dalam format JSON
+        return response()->json([
+            'success' => true,
+            'message' => 'Data berhasil diambil.',
+            'data' => $nota->items, // Menampilkan item terkait dengan nota
+        ], 200);
+    } catch (\Exception $e) {
+        // Tangani error
+        return response()->json([
+            'success' => false,
+            'message' => 'Terjadi kesalahan saat mengambil data.',
+            'error' => $e->getMessage(),
+        ], 500);
+    }
+}
     public function itemNotaById($id)
 {
     try {

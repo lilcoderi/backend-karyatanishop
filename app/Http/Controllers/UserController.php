@@ -349,7 +349,7 @@ class UserController extends Controller
         $validator = Validator::make($request->all(), [
             'nama' => 'required',
             'email' => 'required|email|unique:users,email,' . $id . ',user_id',
-            'password' => 'required|string|min:8',
+            'password' => 'string|min:8',
             'roles' => 'required|array'
         ]);
 
@@ -449,11 +449,32 @@ class UserController extends Controller
      * )
      */
     public function getProfile()
-    {
+{
+    try {
+        // Ambil user yang sedang login
         $user = JWTAuth::parseToken()->authenticate();
+        $user->load('roles'); // Muat relasi roles
 
-        return response()->json($user);
+        // Hitung jumlah roles
+        $rolesCount = $user->roles->count();
+
+        // Tentukan apakah admin icon ditampilkan
+        $showAdminIcon = $rolesCount > 1 || !$user->roles->contains('name', 'customer');
+
+        // Sertakan informasi tambahan dalam respons
+        $profileData = $user->toArray();
+        $profileData['show_admin_icon'] = $showAdminIcon;
+
+        return response()->json($profileData);
+    } catch (\Exception $e) {
+        return response()->json([
+            'message' => 'Gagal mendapatkan profil pengguna.',
+            'error' => $e->getMessage(),
+        ], 500);
     }
+}
+
+
 
     /**
      * @OA\Put(

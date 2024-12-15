@@ -1,4 +1,10 @@
-/.phpunit.cache
+# Ignore everything in storage
+/storage/*
+
+# But not these files...
+!/storage/app/public  # Folder tempat gambar atau file lainnya
+
+# Laravel default exclusions
 /node_modules
 /public/build
 /public/hot

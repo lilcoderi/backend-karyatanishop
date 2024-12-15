@@ -92,21 +92,61 @@ class AddressController extends Controller
     public function updateAddress(Request $request)
     {
         $validated = $request->validate([
-            'alamat' => 'nullable|string',
-            'kota' => 'nullable|string',
-            'provinsi' => 'nullable|string',
+            'alamat' => 'required|string',
+            'kota' => 'required|string',
+            'provinsi' => 'required|integer', // or 'exists:provinces,id' if it's an ID
             'kecamatan' => 'nullable|string',
             'kelurahan' => 'nullable|string',
             'kode_pos' => 'nullable|string|max:10',
         ]);
-
-        $user = JWTAuth::parseToken()->authenticate();
-
+    
+        try {
+            $user = JWTAuth::parseToken()->authenticate();
+        } catch (Exception $e) {
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+    
         $address = Address::firstOrNew(['user_id' => $user->user_id]);
-
+    
         $address->fill($validated);
-        $address->save();
-
-        return response()->json(['message' => 'Address updated successfully', 'address' => $address]);
+    
+        if ($address->save()) {
+            return response()->json(['message' => 'Address updated successfully', 'address' => $address]);
+        } else {
+            return response()->json(['error' => 'Failed to update address'], 500);
+        }
     }
+
+    public function getAllAddresses()
+{
+    $addresses = Address::with('user')->get();
+
+    return response()->json([
+        'status' => 'success',
+        'data' => $addresses,
+    ]);
+}
+
+public function getAddressByUserId(Request $request, $userId)
+{
+    // Mencari address berdasarkan user_id
+    $address = Address::where('user_id', $userId)->get();
+
+    // Cek apakah address ditemukan
+    if ($address->isEmpty()) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Address not found for the given user_id.',
+        ], 404);
+    }
+
+    return response()->json([
+        'status' => 'success',
+        'data' => $address,
+    ]);
+}
+
+
+
+    
 }

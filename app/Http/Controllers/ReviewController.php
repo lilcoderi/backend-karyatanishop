@@ -6,7 +6,7 @@ use App\Models\Review;
 use App\Models\Produk;
 use Illuminate\Http\Request;
 use Tymon\JWTAuth\Facades\JWTAuth;
-
+use App\Models\Order;
 class ReviewController extends Controller
 {
     /**
@@ -48,7 +48,10 @@ class ReviewController extends Controller
             'produk_id' => 'required|exists:produk,produk_id', // Pastikan produk_id ada dalam tabel produk
             'content' => 'required|string',
             'rating' => 'required|integer|min:1|max:5',
+            'order_id' => 'required|exists:order,order_id', // Validasi order_id pada tabel 'orders'
         ]);
+        
+        
 
         // Autentikasi user menggunakan JWT
         $user = JWTAuth::parseToken()->authenticate();
@@ -65,17 +68,51 @@ class ReviewController extends Controller
             return response()->json(['message' => 'Produk not found'], 404);
         }
 
+        // Cek apakah order_id terkait dengan user ini
+        $order = Order::find($validated['order_id']);
+        if (!$order || $order->user_id != $userId) {
+            return response()->json(['message' => 'Order not found or not associated with this user'], 404);
+        }
+
         // Menyimpan review ke database
         $review = Review::create([
             'produk_id' => $validated['produk_id'],
             'user_id' => $userId,
             'content' => $validated['content'],
             'rating' => $validated['rating'],
+            'order_id' => $validated['order_id'], // Simpan order_id
         ]);
 
         // Mengirimkan respon sukses dengan data review yang baru
         return response()->json(['message' => 'Review created', 'review' => $review], 201);
 
+    } catch (\Exception $e) {
+        // Menangani error jika terjadi kesalahan di server
+        return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
+    }
+}
+
+public function getReviewsByOrderId(Request $request)
+{
+    try {
+        // Ambil order_id dari query parameter
+        $orderId = $request->query('order_id');
+
+        // Validasi jika order_id ada
+        if (!$orderId) {
+            return response()->json(['message' => 'order_id parameter is required'], 400);
+        }
+
+        // Cari review berdasarkan order_id
+        $reviews = Review::where('order_id', $orderId)->get();
+
+        // Jika tidak ada review terkait order_id
+        if ($reviews->isEmpty()) {
+            return response()->json(['message' => 'No reviews found for this order'], 404);
+        }
+
+        // Kembalikan response dengan data review
+        return response()->json(['reviews' => $reviews], 200);
     } catch (\Exception $e) {
         // Menangani error jika terjadi kesalahan di server
         return response()->json(['message' => 'Error: ' . $e->getMessage()], 500);
@@ -191,26 +228,37 @@ class ReviewController extends Controller
      *     )
      * )
      */
-    public function update(Request $request, $id)
-    {
-        $review = Review::findOrFail($id);
+    public function update(Request $request, $order_id)
+{
+    // Cari review berdasarkan order_id
+    $review = Review::where('order_id', $order_id)->first();
 
-        $user = JWTAuth::parseToken()->authenticate();
-        $userId = $user->user_id;
-
-        if ($review->user_id != $userId) {
-            return response()->json(['error' => 'Unauthorized'], 403);
-        }
-
-        $validated = $request->validate([
-            'content' => 'required|string',
-            'rating' => 'required|integer|min:1|max:5',
-        ]);
-
-        $review->update($validated);
-
-        return response()->json(['message' => 'Review updated', 'review' => $review]);
+    // Jika review tidak ditemukan, kembalikan respons error
+    if (!$review) {
+        return response()->json(['error' => 'Review not found'], 404);
     }
+
+    // Autentikasi pengguna
+    $user = JWTAuth::parseToken()->authenticate();
+    $userId = $user->user_id;
+
+    // Periksa apakah review milik pengguna yang sedang login
+    if ($review->user_id != $userId) {
+        return response()->json(['error' => 'Unauthorized'], 403);
+    }
+
+    // Validasi input
+    $validated = $request->validate([
+        'content' => 'required|string',
+        'rating' => 'required|integer|min:1|max:5',
+    ]);
+
+    // Perbarui review
+    $review->update($validated);
+
+    // Kembalikan respons sukses
+    return response()->json(['message' => 'Review updated', 'review' => $review]);
+}
 
     /**
      * @OA\Delete(
@@ -256,6 +304,22 @@ class ReviewController extends Controller
 
         return response()->json(['message' => 'Review deleted']);
     }
+
+    public function showReviewByOrderId($order_id)
+    {
+        // Mengambil review berdasarkan order_id
+        $review = Review::with('user')->where('order_id', $order_id)->first();
+    
+        // Jika review tidak ditemukan, kembalikan respons error
+        if (!$review) {
+            return response()->json(['error' => 'Review not found'], 404);
+        }
+    
+        // Mengembalikan review dalam format JSON
+        return response()->json($review);
+    }
+    
+
 
     public function getAverageRating($produk_id)
 {

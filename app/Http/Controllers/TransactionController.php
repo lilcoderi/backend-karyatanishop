@@ -33,15 +33,18 @@ class TransactionController extends Controller
      * )
      */
     public function index(Request $request)
-{
-    // Mengambil data transaksi dengan relasi 'order', paginasi 5 item per halaman
-    $transactions = Transaksi::with('order')->paginate(5);
-
-    return response()->json([
-        'status' => 'success',
-        'data' => $transactions,
-    ]);
-}
+    {
+        // Mengambil data transaksi dengan relasi 'order', diurutkan berdasarkan tanggal terbaru, paginasi 5 item per halaman
+        $transactions = Transaksi::with('order')
+            ->orderBy('created_at', 'desc') // Mengurutkan berdasarkan tanggal terbaru
+            ->paginate(5);
+    
+        return response()->json([
+            'status' => 'success',
+            'data' => $transactions,
+        ]);
+    }
+    
 
 
     /**
